@@ -1,7 +1,7 @@
 pkgbase = openbot-bin
 	pkgdesc = A local-first multi-agent desktop workspace (prebuilt AppImage)
 	pkgver = 0.77.0
-	pkgrel = 1
+	pkgrel = 2
 	url = https://github.com/nightly-labs/openbot
 	arch = x86_64
 	arch = aarch64
@@ -14,7 +14,6 @@ pkgbase = openbot-bin
 	depends = gcc-libs
 	depends = glib2
 	depends = gtk3
-	depends = libgbm
 	depends = libsecret
 	depends = libx11
 	depends = libxcb

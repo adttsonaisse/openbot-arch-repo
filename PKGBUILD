@@ -1,7 +1,7 @@
 # Maintainer: openbot-arch-repo contributors
 pkgname=openbot-bin
 pkgver=0.77.0
-pkgrel=1
+pkgrel=2
 pkgdesc="A local-first multi-agent desktop workspace (prebuilt AppImage)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/nightly-labs/openbot"
@@ -14,7 +14,6 @@ depends=(
   'gcc-libs'
   'glib2'
   'gtk3'
-  'libgbm'
   'libsecret'
   'libx11'
   'libxcb'
