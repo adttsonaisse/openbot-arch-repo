@@ -1,0 +1,261 @@
+name: Build & Publish Arch Linux Repo
+
+on:
+  schedule:
+    # Run daily at 03:00 UTC (10:00 WIB)
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'OpenBot version to build (leave empty for latest release)'
+        required: false
+        type: string
+      force_rebuild:
+        description: 'Rebuild and republish even if PKGBUILD is already up to date'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'PKGBUILD'
+      - 'scripts/**'
+      - '.github/workflows/build-arch-repo.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: arch-repo-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check Upstream OpenBot Release
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      target_version: ${{ steps.check.outputs.target_version }}
+      pkgver_changed: ${{ steps.check.outputs.pkgver_changed }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compare PKGBUILD with latest nightly-labs/openbot release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          CURRENT_PKGVER="$(awk -F= '/^pkgver=/{print $2; exit}' PKGBUILD | tr -d "'\"")"
+
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            TARGET_VERSION="${INPUT_VERSION#v}"
+          else
+            LATEST_TAG="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/nightly-labs/openbot/releases/latest" | jq -r '.tag_name')"
+            TARGET_VERSION="${LATEST_TAG#v}"
+          fi
+
+          if [[ -z "${TARGET_VERSION}" || "${TARGET_VERSION}" == "null" ]]; then
+            echo "Error: could not resolve target version." >&2
+            exit 1
+          fi
+
+          PKGVER_CHANGED="false"
+          SHOULD_BUILD="false"
+
+          if [[ "${TARGET_VERSION}" != "${CURRENT_PKGVER}" ]]; then
+            PKGVER_CHANGED="true"
+            SHOULD_BUILD="true"
+          fi
+
+          if [[ "${FORCE_REBUILD}" == "true" || "${EVENT_NAME}" == "push" ]]; then
+            SHOULD_BUILD="true"
+          fi
+
+          # Also build if either arch release does not exist yet
+          for arch in x86_64 aarch64; do
+            if ! gh release view "arch-${arch}" >/dev/null 2>&1; then
+              echo "Release arch-${arch} does not exist yet; enabling build."
+              SHOULD_BUILD="true"
+            fi
+          done
+
+          echo "Current PKGBUILD : ${CURRENT_PKGVER}"
+          echo "Target upstream  : ${TARGET_VERSION}"
+          echo "pkgver_changed   : ${PKGVER_CHANGED}"
+          echo "should_build     : ${SHOULD_BUILD}"
+
+          {
+            echo "target_version=${TARGET_VERSION}"
+            echo "pkgver_changed=${PKGVER_CHANGED}"
+            echo "should_build=${SHOULD_BUILD}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update PKGBUILD for target version
+        if: needs.check.outputs.pkgver_changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TARGET_VERSION: ${{ needs.check.outputs.target_version }}
+        run: |
+          ./scripts/update-pkgbuild.sh "${TARGET_VERSION}"
+
+      - name: Build package and pacman repo in archlinux:base-devel
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets updated-pkgbuild
+
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e TARGET_ARCH \
+            -e GPG_PRIVATE_KEY \
+            -e GPG_PASSPHRASE \
+            archlinux:base-devel \
+            bash -euo pipefail -c '
+              pacman -Syu --noconfirm --needed base-devel squashfs-tools binutils gnupg
+
+              useradd -m builder
+              cp -a /work /home/builder/build
+              chown -R builder:builder /home/builder/build
+
+              cat <<'\''BUILDER_EOF'\'' > /tmp/ci-build.sh
+          set -euo pipefail
+          cd /home/builder/build
+
+          BUILD_ARGS=(--arch "${TARGET_ARCH}" --nodeps --clean)
+
+          if [[ -n "${GPG_PRIVATE_KEY:-}" ]]; then
+            mkdir -p ~/.gnupg
+            chmod 700 ~/.gnupg
+            echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+            echo "allow-preset-passphrase" >> ~/.gnupg/gpg-agent.conf
+            gpg --batch --import <<< "${GPG_PRIVATE_KEY}"
+            KEY_FPR="$(gpg --list-secret-keys --with-colons | awk -F: "/^fpr:/{print \$10; exit}")"
+            if [[ -n "${GPG_PASSPHRASE:-}" ]]; then
+              KEYGRIP="$(gpg --list-secret-keys --with-keygrip --with-colons | awk -F: "/^grp:/{print \$10; exit}")"
+              if [[ -n "${KEYGRIP}" && -x /usr/lib/gnupg/gpg-preset-passphrase ]]; then
+                printf "%s" "${GPG_PASSPHRASE}" | /usr/lib/gnupg/gpg-preset-passphrase --preset "${KEYGRIP}"
+              fi
+            fi
+            BUILD_ARGS+=(--gpg-key "${KEY_FPR}")
+            gpg --armor --export "${KEY_FPR}" > /home/builder/build/public.asc
+          fi
+
+          ./scripts/build-local-repo.sh "${BUILD_ARGS[@]}"
+          BUILDER_EOF
+
+              su - builder -w TARGET_ARCH,GPG_PRIVATE_KEY,GPG_PASSPHRASE -c "bash /tmp/ci-build.sh"
+
+              mkdir -p "/work/release-assets/${TARGET_ARCH}"
+              # Copy dereferenced files because GitHub Releases does not preserve symlinks
+              cp -L /home/builder/build/repo/"${TARGET_ARCH}"/* "/work/release-assets/${TARGET_ARCH}/"
+              if [[ -f /home/builder/build/public.asc ]]; then
+                cp /home/builder/build/public.asc "/work/release-assets/${TARGET_ARCH}/openbot-repo.asc"
+              fi
+
+              cp /home/builder/build/PKGBUILD /work/updated-pkgbuild/PKGBUILD
+              cp /home/builder/build/.SRCINFO /work/updated-pkgbuild/.SRCINFO
+            '
+
+      - name: Publish to GitHub Release (arch-${{ matrix.arch }})
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          TARGET_VERSION: ${{ needs.check.outputs.target_version }}
+        run: |
+          set -euo pipefail
+          TAG="arch-${TARGET_ARCH}"
+          ASSET_DIR="release-assets/${TARGET_ARCH}"
+
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release create "${TAG}" \
+              --title "OpenBot Arch Repo (${TARGET_ARCH})" \
+              --notes "Automated Arch Linux pacman repository for openbot-bin (${TARGET_ARCH})."
+          fi
+
+          NEW_PKG_BASENAME="$(basename "$(find "${ASSET_DIR}" -maxdepth 1 -name 'openbot-bin-*.pkg.tar.*' ! -name '*.sig' | head -n1)")"
+
+          # Upload new package + repo DB files (overwriting DB assets with --clobber)
+          gh release upload "${TAG}" "${ASSET_DIR}"/* --clobber
+
+          # Prune older openbot-bin package versions from the release
+          EXISTING_PKGS="$(gh release view "${TAG}" --json assets -q '.assets[].name' | grep -E '^openbot-bin-.*\.pkg\.tar\.' || true)"
+          while IFS= read -r asset; do
+            [[ -z "${asset}" ]] && continue
+            if [[ "${asset}" != "${NEW_PKG_BASENAME}" && "${asset}" != "${NEW_PKG_BASENAME}.sig" ]]; then
+              echo "Removing old asset: ${asset}"
+              gh release delete-asset "${TAG}" "${asset}" --yes
+            fi
+          done <<< "${EXISTING_PKGS}"
+
+          RELEASE_NOTES="$(printf 'Automated Arch Linux pacman repository for `openbot-bin` `%s` (`%s`).\n\nBuilt from official `nightly-labs/openbot` AppImage release.\nLicense: `PolyForm-Noncommercial-1.0.0` (non-commercial use only).' "${TARGET_VERSION}" "${TARGET_ARCH}")"
+
+          gh release edit "${TAG}" \
+            --title "OpenBot Arch Repo (${TARGET_ARCH}) - v${TARGET_VERSION}" \
+            --notes "${RELEASE_NOTES}"
+
+      - name: Upload updated PKGBUILD and .SRCINFO
+        if: matrix.arch == 'x86_64' && needs.check.outputs.pkgver_changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: updated-pkgbuild
+          path: |
+            updated-pkgbuild/PKGBUILD
+            updated-pkgbuild/.SRCINFO
+          retention-days: 1
+
+  commit-pkgbuild:
+    name: Commit Updated PKGBUILD & .SRCINFO
+    needs: [check, build]
+    if: needs.check.outputs.pkgver_changed == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download updated PKGBUILD & .SRCINFO
+        uses: actions/download-artifact@v4
+        with:
+          name: updated-pkgbuild
+          path: .
+
+      - name: Commit and push changes
+        env:
+          TARGET_VERSION: ${{ needs.check.outputs.target_version }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet PKGBUILD .SRCINFO; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "chore(pkgbuild): update openbot-bin to ${TARGET_VERSION}"
+          git push

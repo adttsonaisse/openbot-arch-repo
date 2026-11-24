@@ -1,0 +1,14 @@
+# makepkg build artifacts
+src/
+pkg/
+*.AppImage
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+*.pkg.tar.xz
+*.pkg.tar.xz.sig
+*-LICENSE
+*-NOTICE
+*.log
+
+# local pacman repository output
+repo/
