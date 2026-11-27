@@ -1,6 +1,6 @@
 # Maintainer: openbot-arch-repo contributors
 pkgname=openbot-bin
-pkgver=0.79.0
+pkgver=0.80.0
 pkgrel=1
 pkgdesc="A local-first multi-agent desktop workspace (prebuilt AppImage)"
 arch=('x86_64' 'aarch64')
@@ -63,13 +63,13 @@ noextract=(
 
 sha256sums=(
   'ffe034ecf735f296ca53cbd856c944849f0c80c7e1490ce162038a99ad89c728'
-  '9f7a80889da91c0287bf452b755c6bfe1f352b3da335405dd8fa197f05598c56'
+  '59332c2016e4c4133f07ca2155901752d8c89d6303db5bf3b82f5cbbddaed2d4'
 )
 sha256sums_x86_64=(
-  '0b51ebcfae460f7dc345e463de170560061da87a3a0dcf989522f8c091ea3231'
+  '0e7815be73f39d248e2dd9f9617e40870105aeefe241a8fef4feb900b92c2944'
 )
 sha256sums_aarch64=(
-  '8d26ffb8789dd6836a8e7d77f536899e6ee5c4f19ca1128625b040df364a6fff'
+  'a4cdab96cf371eb2358549a8ea0466e3e3274cd85183d17738314e12b31a1f5a'
 )
 
 prepare() {
